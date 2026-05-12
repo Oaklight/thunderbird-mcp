@@ -290,16 +290,27 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
         name: "createTask",
         group: "calendar", crud: "create",
         title: "Create Task",
-        description: "Open a pre-filled task dialog in Thunderbird for user review before saving",
+        description: "Open a pre-filled task dialog in Thunderbird for user review before saving, or save directly when skipReview is true.",
         inputSchema: {
           type: "object",
           properties: {
             title: { type: "string", description: "Task title" },
             dueDate: { type: "string", description: "Due date in ISO 8601 format (optional)" },
             calendarId: { type: "string", description: "Target calendar ID (from listCalendars, must have supportsTasks=true)" },
+            description: { type: "string", description: "Task description/body (optional)" },
+            priority: { type: "integer", description: "Priority: 1=high, 5=normal, 9=low (optional)" },
+            categories: { type: "array", items: { type: "string" }, description: "Category labels (optional). Use listCategories to get exact existing names before setting." },
+            skipReview: { type: "boolean", description: "If true, save the task directly without opening a review dialog (default: false)" },
           },
           required: ["title"],
         },
+      },
+      {
+        name: "listCategories",
+        group: "calendar", crud: "read",
+        title: "List Categories",
+        description: "Return all calendar category names defined in Thunderbird preferences. Use this before creating tasks or events to get exact category names (case-sensitive).",
+        inputSchema: { type: "object", properties: {} },
       },
       {
         name: "listTasks",
@@ -2955,7 +2966,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                 const changes = [];
 
                 if (title !== undefined) { newItem.title = title; changes.push("title"); }
-                if (description !== undefined) { newItem.setProperty("DESCRIPTION", description); changes.push("description"); }
+                if (description !== undefined) { newItem.descriptionHTML = descriptionToHTML(description); changes.push("description"); }
                 if (priority !== undefined) { newItem.priority = priority; changes.push("priority"); }
 
                 if (dueDate !== undefined) {
@@ -3115,6 +3126,15 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
 
                 results.sort((a, b) => new Date(a.startDate) - new Date(b.startDate));
                 return results.slice(0, limit);
+              } catch (e) {
+                return { error: e.toString() };
+              }
+            }
+
+            function listCategories() {
+              try {
+                const names = cal.category.fromPrefs();
+                return { categories: names.sort((a, b) => a.localeCompare(b)) };
               } catch (e) {
                 return { error: e.toString() };
               }
@@ -3326,12 +3346,30 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
               }
             }
 
-            function createTask(title, dueDate, calendarId) {
+            function descriptionToHTML(text) {
+              // Stash existing <a> tags so they survive HTML escaping.
+              const anchors = [];
+              let processed = text.replace(/<a\s[^>]*>[\s\S]*?<\/a>/gi, match => {
+                anchors.push(match);
+                return `\x00ANCHOR${anchors.length - 1}\x00`;
+              });
+              // Escape remaining plain text, then auto-link bare URLs.
+              processed = processed
+                .replace(/&/g, "&amp;")
+                .replace(/</g, "&lt;")
+                .replace(/>/g, "&gt;");
+              processed = processed.replace(
+                /https?:\/\/[^\s<>"]+/g,
+                url => `<a href="${url}">${url}</a>`
+              );
+              // Restore stashed <a> tags and convert newlines.
+              processed = processed.replace(/\x00ANCHOR(\d+)\x00/g, (_, i) => anchors[i]);
+              return `<html><body><div>${processed.replace(/\n/g, "<br>")}</div></body></html>`;
+            }
+
+            async function createTask(title, dueDate, calendarId, description, priority, categories, skipReview) {
               if (!cal || !CalTodo) return { error: "Calendar module not available" };
               try {
-                const win = Services.wm.getMostRecentWindow("mail:3pane");
-                if (!win) return { error: "No Thunderbird window found" };
-
                 let dueDt = null;
                 if (dueDate) {
                   const js = new Date(dueDate);
@@ -3357,9 +3395,37 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                   }
                 }
 
-                // Cross-context CalTodo objects cause silent save failure in dialog.
-                // Pass title as summary param; TB creates its own CalTodo internally.
-                win.createTodoWithDialog(targetCalendar, dueDt, title, null);
+                // Build a fully-populated CalTodo. The extension runs in addon_parent
+                // (main-process privileged context) and imports CalTodo from the same
+                // resource:/// ESModule singleton as the chrome, so the object is fully
+                // interoperable with createTodoWithDialog and the task edit dialog.
+                const todo = new CalTodo();
+                todo.title = title;
+                if (dueDt) todo.dueDate = dueDt;
+                if (description) todo.descriptionHTML = descriptionToHTML(description);
+                if (priority !== undefined) todo.priority = priority;
+                if (categories && categories.length > 0) todo.setCategories(categories);
+                if (targetCalendar) todo.calendar = targetCalendar;
+
+                if (skipReview) {
+                  if (!targetCalendar) {
+                    targetCalendar = cal.manager.getCalendars().find(
+                      c => !c.readOnly && c.getProperty("capabilities.tasks.supported") !== false
+                    );
+                    if (!targetCalendar) return { error: "No writable task-capable calendar found" };
+                    todo.calendar = targetCalendar;
+                  }
+                  await targetCalendar.addItem(todo);
+                  return { success: true, message: `Task "${title}" created in calendar "${targetCalendar.name}"` };
+                }
+
+                const win = Services.wm.getMostRecentWindow("mail:3pane");
+                if (!win) return { error: "No Thunderbird window found" };
+
+                // Pass the pre-populated CalTodo to the dialog. createTodoWithDialog
+                // clones it (clearing the id) before opening, so all fields are
+                // pre-filled and the user can review or cancel without side effects.
+                win.createTodoWithDialog(targetCalendar, dueDt, null, todo);
 
                 return { success: true, message: `Task dialog opened for "${title}"` };
               } catch (e) {
@@ -5371,8 +5437,10 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                   return await updateEvent(args.eventId, args.calendarId, args.title, args.startDate, args.endDate, args.location, args.description, args.status);
                 case "deleteEvent":
                   return await deleteEvent(args.eventId, args.calendarId);
+                case "listCategories":
+                  return listCategories();
                 case "createTask":
-                  return createTask(args.title, args.dueDate, args.calendarId);
+                  return await createTask(args.title, args.dueDate, args.calendarId, args.description, args.priority, args.categories, args.skipReview);
                 case "listTasks":
                   return await listTasks(args.calendarId, args.completed, args.dueBefore, args.maxResults);
                 case "updateTask":
