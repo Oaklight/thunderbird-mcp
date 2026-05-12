@@ -77,6 +77,32 @@
       font-size: 13px;
       margin: 8px 0 0;
     }
+    .warning-note {
+      color: #9f1b00;
+    }
+    .token-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-top: 12px;
+      flex-wrap: wrap;
+    }
+    .token-row label {
+      color: #5b5b66;
+      min-width: 130px;
+    }
+    .token-row input[type="text"] {
+      flex: 1 1 360px;
+      min-width: 0;
+      font-family: monospace;
+      font-size: 13px;
+      padding: 6px 8px;
+      border: 1px solid #cfcfd8;
+      border-radius: 4px;
+    }
+    .token-row input[readonly] {
+      background: #f9f9fa;
+    }
     .tool-group-header {
       font-size: 13px;
       font-weight: 600;
@@ -171,6 +197,41 @@
   <div class="save-row">
     <button id="saveToolsBtn" disabled>Save</button>
     <span id="saveToolsStatus" class="save-status"></span>
+  </div>
+</div>
+
+<div class="section">
+  <h2>Authentication</h2>
+  <div class="token-row">
+    <label for="currentAuthToken">Current session token:</label>
+    <input type="text" id="currentAuthToken" readonly placeholder="Not available">
+    <button id="copyAuthTokenBtn" disabled>Copy</button>
+    <span id="copyAuthTokenStatus" class="save-status"></span>
+  </div>
+  <p class="mode-note warning-note">
+    Stable token mode keeps the same token across restarts. If the connection file leaks,
+    the token stays valid until you regenerate or clear it. Changes apply next time the MCP server starts.
+  </p>
+  <ul class="account-list">
+    <li>
+      <label>
+        <input type="checkbox" id="useStableAuthToken">
+        <span>Use stable token</span>
+      </label>
+    </li>
+  </ul>
+  <div id="stableAuthTokenControls" hidden>
+    <div class="token-row">
+      <label for="stableAuthToken">Stable token:</label>
+      <input type="text" id="stableAuthToken" autocomplete="off" spellcheck="false">
+      <button id="generateStableAuthTokenBtn">Generate</button>
+    </div>
+    <div class="save-row">
+      <button id="regenerateStableAuthTokenBtn">Regenerate</button>
+    </div>
+  </div>
+  <div class="save-row">
+    <span id="stableAuthTokenStatus" class="save-status"></span>
   </div>
 </div>
 

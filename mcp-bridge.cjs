@@ -21,6 +21,7 @@ const DEFAULT_PROC_ROOT = '/proc';
 const DEFAULT_DARWIN_FOLDERS_ROOT = '/var/folders';
 const THUNDERBIRD_MCP_SUBDIR = 'thunderbird-mcp';
 const CONNECTION_FILE_BASENAME = 'connection.json';
+const AUTH_TOKEN_PATTERN = /^[0-9a-f]{64}$/;
 
 // MCP protocol versions the bridge knows how to speak. Per lifecycle spec the
 // server MUST respond with the requested version if it supports it, otherwise
@@ -53,6 +54,10 @@ function debugLog(message) {
   if (DEBUG) {
     process.stderr.write('[thunderbird-mcp] ' + message + '\n');
   }
+}
+
+function isValidAuthToken(token) {
+  return typeof token === 'string' && AUTH_TOKEN_PATTERN.test(token);
 }
 
 let cachedConnectionInfo = null;
@@ -728,6 +733,9 @@ async function forwardToThunderbird(message) {
     if (typeof connInfo.port !== 'number' || connInfo.port < 1 || connInfo.port > 65535 || !Number.isInteger(connInfo.port)) {
       throw new Error('Invalid connection file: port must be an integer between 1 and 65535');
     }
+    if (!isValidAuthToken(connInfo.token)) {
+      throw new Error('Invalid connection file: token must be 64 lowercase hex characters');
+    }
 
     try {
       return await tryAllHosts(THUNDERBIRD_HOSTS, postData, connInfo.port, connInfo.token);
@@ -865,6 +873,7 @@ module.exports = {
   findMacOsConnectionCandidates,
   findSnapConnectionCandidates,
   formatDiscoveryAttempts,
+  isValidAuthToken,
   readConnectionInfo,
   startBridge,
 };

@@ -125,7 +125,7 @@ describe('Auth: connection info file', () => {
 
   it('bridge reads port and token from connection.json', async () => {
     const TEST_PORT = 18765;
-    const TEST_TOKEN = 'test-secret-token-abc123';
+    const TEST_TOKEN = 'a'.repeat(64);
     let receivedHeaders = null;
     let receivedPort = null;
 
@@ -193,7 +193,7 @@ describe('Auth: connection info file', () => {
 describe('Auth: token verification', () => {
   let server;
   const TEST_PORT = 18766;
-  const CORRECT_TOKEN = 'correct-token-xyz';
+  const CORRECT_TOKEN = 'b'.repeat(64);
 
   before(async () => {
     backupConnectionFile();
@@ -250,7 +250,7 @@ describe('Auth: token verification', () => {
   });
 
   it('fails with wrong token', async () => {
-    writeTestConnectionInfo(TEST_PORT, 'wrong-token');
+    writeTestConnectionInfo(TEST_PORT, 'c'.repeat(64));
 
     const response = await sendToBridge({
       jsonrpc: '2.0',
@@ -488,7 +488,7 @@ describe('Auth: connection file corruption', () => {
   it('accepts connection file with extra fields (forward compat)', async (t) => {
     if (thunderbirdRunning) return t.skip('Thunderbird running');
     const TEST_PORT = 18767;
-    const TEST_TOKEN = 'extra-fields-token';
+    const TEST_TOKEN = 'd'.repeat(64);
 
     const server = http.createServer((req, res) => {
       res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -520,17 +520,25 @@ describe('Auth: connection file corruption', () => {
     }
   });
 
-  it('handles very large token in connection file', async (t) => {
+  it('rejects malformed tokens before contacting Thunderbird', async (t) => {
     if (thunderbirdRunning) return t.skip('Thunderbird running');
     const TEST_PORT = 18768;
-    const LARGE_TOKEN = 'x'.repeat(2048);
+    let requestCount = 0;
+    const cases = [
+      { name: 'whitespace-only', token: ' '.repeat(64) },
+      { name: 'uppercase hex', token: 'A'.repeat(64) },
+      { name: 'too short', token: 'a'.repeat(63) },
+      { name: 'too long', token: 'a'.repeat(65) },
+      { name: 'trailing newline', token: `${'a'.repeat(64)}\n` },
+      { name: 'non-hex characters', token: 'g'.repeat(64) },
+      { name: 'very large', token: 'x'.repeat(2048) },
+      { name: 'special characters', token: 'tok3n+with/special=chars&more!@#$%' },
+    ];
 
     const server = http.createServer((req, res) => {
-      // Verify the large token arrives correctly
-      const authHeader = req.headers['authorization'] || '';
-      assert.equal(authHeader, `Bearer ${LARGE_TOKEN}`);
+      requestCount += 1;
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ jsonrpc: '2.0', id: 29, result: { ok: true } }));
+      res.end(JSON.stringify({ jsonrpc: '2.0', id: null, result: { shouldNotReach: true } }));
     });
 
     await new Promise((resolve, reject) => {
@@ -539,49 +547,23 @@ describe('Auth: connection file corruption', () => {
     });
 
     try {
-      writeTestConnectionInfo(TEST_PORT, LARGE_TOKEN);
+      for (let i = 0; i < cases.length; i++) {
+        const testCase = cases[i];
+        const id = 29 + i;
+        requestCount = 0;
+        writeTestConnectionInfo(TEST_PORT, testCase.token);
 
-      const response = await sendToBridge({
-        jsonrpc: '2.0',
-        id: 29,
-        method: 'tools/list'
-      });
+        const response = await sendToBridge({
+          jsonrpc: '2.0',
+          id,
+          method: 'tools/list'
+        });
 
-      assert.equal(response.id, 29);
-      assert.ok(response.result);
-    } finally {
-      await new Promise((resolve) => server.close(resolve));
-    }
-  });
-
-  it('handles special characters in token', async (t) => {
-    if (thunderbirdRunning) return t.skip('Thunderbird running');
-    const TEST_PORT = 18769;
-    const SPECIAL_TOKEN = 'tok3n+with/special=chars&more!@#$%';
-
-    const server = http.createServer((req, res) => {
-      const authHeader = req.headers['authorization'] || '';
-      assert.equal(authHeader, `Bearer ${SPECIAL_TOKEN}`);
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ jsonrpc: '2.0', id: 30, result: { ok: true } }));
-    });
-
-    await new Promise((resolve, reject) => {
-      server.on('error', reject);
-      server.listen(TEST_PORT, '127.0.0.1', resolve);
-    });
-
-    try {
-      writeTestConnectionInfo(TEST_PORT, SPECIAL_TOKEN);
-
-      const response = await sendToBridge({
-        jsonrpc: '2.0',
-        id: 30,
-        method: 'tools/list'
-      });
-
-      assert.equal(response.id, 30);
-      assert.ok(response.result);
+        assert.equal(response.id, id, testCase.name);
+        assert.ok(response.error, testCase.name);
+        assert.match(response.error.message, /token must be 64 lowercase hex characters/, testCase.name);
+        assert.equal(requestCount, 0, `${testCase.name} should be rejected before HTTP`);
+      }
     } finally {
       await new Promise((resolve) => server.close(resolve));
     }
@@ -725,7 +707,7 @@ describe('Auth: bridge retry then fail', () => {
     try { fs.unlinkSync(CONN_FILE); } catch { /* ignore */ }
 
     const TEST_PORT = 18770;
-    const TEST_TOKEN = 'delayed-token';
+    const TEST_TOKEN = 'e'.repeat(64);
 
     const server = http.createServer((req, res) => {
       res.writeHead(200, { 'Content-Type': 'application/json' });

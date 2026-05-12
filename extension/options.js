@@ -14,6 +14,16 @@ const toolList = document.getElementById("toolList");
 const saveToolsBtn = document.getElementById("saveToolsBtn");
 const saveToolsStatus = document.getElementById("saveToolsStatus");
 
+const currentAuthTokenInput = document.getElementById("currentAuthToken");
+const copyAuthTokenBtn = document.getElementById("copyAuthTokenBtn");
+const copyAuthTokenStatus = document.getElementById("copyAuthTokenStatus");
+const useStableAuthTokenCheckbox = document.getElementById("useStableAuthToken");
+const stableAuthTokenControls = document.getElementById("stableAuthTokenControls");
+const stableAuthTokenInput = document.getElementById("stableAuthToken");
+const generateStableAuthTokenBtn = document.getElementById("generateStableAuthTokenBtn");
+const regenerateStableAuthTokenBtn = document.getElementById("regenerateStableAuthTokenBtn");
+const stableAuthTokenStatus = document.getElementById("stableAuthTokenStatus");
+
 let currentAccounts = [];
 let currentTools = [];
 
@@ -61,6 +71,139 @@ async function loadServerInfo() {
     statusText.textContent = "Error: " + e.message;
   }
 }
+
+function updateStableAuthTokenControls() {
+  stableAuthTokenControls.hidden = !useStableAuthTokenCheckbox.checked;
+}
+
+function setStableAuthTokenBusy(busy) {
+  useStableAuthTokenCheckbox.disabled = busy;
+  stableAuthTokenInput.disabled = busy;
+  generateStableAuthTokenBtn.disabled = busy;
+  regenerateStableAuthTokenBtn.disabled = busy;
+}
+
+function setStableAuthTokenStatus(message, error = false) {
+  stableAuthTokenStatus.textContent = message;
+  stableAuthTokenStatus.className = error ? "save-status error" : "save-status";
+}
+
+async function requestGeneratedAuthToken() {
+  const result = await browser.mcpServer.generateAuthToken();
+  if (result.error) {
+    throw new Error(result.error);
+  }
+  if (!result.authToken) {
+    throw new Error("Generated token was empty");
+  }
+  return result.authToken;
+}
+
+async function saveStableAuthTokenValue(value, successMessage = "Saved.") {
+  const stableAuthToken = value.trim();
+  setStableAuthTokenStatus("Saving...");
+  const result = await browser.mcpServer.setStableAuthToken(stableAuthToken);
+  if (result.error) {
+    setStableAuthTokenStatus(result.error, true);
+    return false;
+  }
+  stableAuthTokenInput.value = result.stableAuthToken || "";
+  setStableAuthTokenStatus(successMessage);
+  return true;
+}
+
+async function updateStoredStableAuthToken(value, successMessage) {
+  setStableAuthTokenBusy(true);
+  try {
+    await saveStableAuthTokenValue(value, successMessage);
+  } catch (e) {
+    setStableAuthTokenStatus("Error: " + e.message, true);
+  }
+  setStableAuthTokenBusy(false);
+  updateStableAuthTokenControls();
+}
+
+async function generateAndStoreStableAuthToken(successMessage) {
+  setStableAuthTokenBusy(true);
+  try {
+    const token = await requestGeneratedAuthToken();
+    stableAuthTokenInput.value = token;
+    await saveStableAuthTokenValue(token, successMessage);
+  } catch (e) {
+    setStableAuthTokenStatus("Error: " + e.message, true);
+  }
+  setStableAuthTokenBusy(false);
+  updateStableAuthTokenControls();
+}
+
+async function loadAuthenticationConfig() {
+  try {
+    const [current, stable] = await Promise.all([
+      browser.mcpServer.getCurrentAuthToken(),
+      browser.mcpServer.getStableAuthToken(),
+    ]);
+    currentAuthTokenInput.value = current.authToken || "";
+    copyAuthTokenBtn.disabled = !currentAuthTokenInput.value;
+    copyAuthTokenStatus.textContent = "";
+    copyAuthTokenStatus.className = "save-status";
+
+    stableAuthTokenInput.value = stable.stableAuthToken || "";
+    useStableAuthTokenCheckbox.checked = !!stableAuthTokenInput.value;
+    updateStableAuthTokenControls();
+    setStableAuthTokenStatus("");
+  } catch (e) {
+    copyAuthTokenStatus.textContent = "Error loading token: " + e.message;
+    copyAuthTokenStatus.className = "save-status error";
+    setStableAuthTokenStatus("Error loading setting: " + e.message, true);
+  }
+}
+
+copyAuthTokenBtn.addEventListener("click", async () => {
+  copyAuthTokenStatus.textContent = "";
+  copyAuthTokenStatus.className = "save-status";
+  copyAuthTokenBtn.disabled = true;
+  try {
+    await navigator.clipboard.writeText(currentAuthTokenInput.value);
+    copyAuthTokenStatus.textContent = "Copied.";
+  } catch (e) {
+    copyAuthTokenStatus.textContent = "Error: " + e.message;
+    copyAuthTokenStatus.className = "save-status error";
+  }
+  copyAuthTokenBtn.disabled = !currentAuthTokenInput.value;
+});
+
+useStableAuthTokenCheckbox.addEventListener("change", async () => {
+  updateStableAuthTokenControls();
+  if (useStableAuthTokenCheckbox.checked) {
+    if (!stableAuthTokenInput.value.trim()) {
+      await generateAndStoreStableAuthToken("Generated and saved.");
+    } else {
+      await updateStoredStableAuthToken(stableAuthTokenInput.value, "Saved.");
+    }
+  } else {
+    stableAuthTokenInput.value = "";
+    await updateStoredStableAuthToken("", "Stable token cleared.");
+  }
+});
+
+stableAuthTokenInput.addEventListener("change", async () => {
+  if (!useStableAuthTokenCheckbox.checked) {
+    return;
+  }
+  if (!stableAuthTokenInput.value.trim()) {
+    await generateAndStoreStableAuthToken("Generated and saved.");
+  } else {
+    await updateStoredStableAuthToken(stableAuthTokenInput.value, "Saved.");
+  }
+});
+
+generateStableAuthTokenBtn.addEventListener("click", async () => {
+  await generateAndStoreStableAuthToken("Generated and saved.");
+});
+
+regenerateStableAuthTokenBtn.addEventListener("click", async () => {
+  await generateAndStoreStableAuthToken("Regenerated and saved.");
+});
 
 async function loadAccountAccess() {
   try {
@@ -290,6 +433,7 @@ saveSkipReviewBtn.addEventListener("click", async () => {
 });
 
 loadServerInfo().catch(e => console.error("thunderbird-mcp options:", "loadServerInfo failed:", e));
+loadAuthenticationConfig().catch(e => console.error("thunderbird-mcp options:", "loadAuthenticationConfig failed:", e));
 loadAccountAccess().catch(e => console.error("thunderbird-mcp options:", "loadAccountAccess failed:", e));
 loadToolAccess().catch(e => console.error("thunderbird-mcp options:", "loadToolAccess failed:", e));
 loadSkipReviewPref().catch(e => console.error("thunderbird-mcp options:", "loadSkipReviewPref failed:", e));

@@ -78,6 +78,8 @@ const DEFAULT_MAX_RESULTS = 50;
 const PREF_ALLOWED_ACCOUNTS = "extensions.thunderbird-mcp.allowedAccounts";
 const PREF_DISABLED_TOOLS = "extensions.thunderbird-mcp.disabledTools";
 const PREF_BLOCK_SKIPREVIEW = "extensions.thunderbird-mcp.blockSkipReview";
+const PREF_STABLE_AUTH_TOKEN = "extensions.thunderbird-mcp.stableAuthToken";
+const AUTH_TOKEN_PATTERN = /^[0-9a-f]{64}$/;
 // Valid group and CRUD values for tool metadata validation
 const VALID_GROUPS = ["messages", "folders", "contacts", "calendar", "filters", "system"];
 const VALID_CRUD = ["create", "read", "update", "delete"];
@@ -851,6 +853,60 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
     // Group display labels
     const GROUP_LABELS = { system: "System", messages: "Messages", folders: "Folders", contacts: "Contacts", calendar: "Calendar", filters: "Filters" };
 
+    /**
+     * Generate a cryptographically random auth token (hex string).
+     * Used to authenticate bridge requests to the HTTP server.
+     */
+    function generateAuthToken() {
+      const bytes = new Uint8Array(32);
+      // crypto.getRandomValues is not available in Thunderbird experiment API scope;
+      // use the XPCOM random generator instead.
+      const rng = Cc["@mozilla.org/security/random-generator;1"]
+        .createInstance(Ci.nsIRandomGenerator);
+      const randomBytes = rng.generateRandomBytes(32);
+      for (let i = 0; i < 32; i++) bytes[i] = randomBytes[i];
+      return Array.from(bytes, b => b.toString(16).padStart(2, "0")).join("");
+    }
+
+    function getStableAuthTokenPref() {
+      try {
+        const pref = Services.prefs.getStringPref(PREF_STABLE_AUTH_TOKEN, "");
+        const token = pref.trim();
+        if (!token) {
+          if (pref) {
+            console.warn("thunderbird-mcp: stableAuthToken preference is malformed; expected 64 lowercase hex characters, ignoring stored value");
+          }
+          return "";
+        }
+        if (!AUTH_TOKEN_PATTERN.test(token)) {
+          console.warn("thunderbird-mcp: stableAuthToken preference is malformed; expected 64 lowercase hex characters, ignoring stored value");
+          return "";
+        }
+        return token;
+      } catch {
+        return "";
+      }
+    }
+
+    function readConnectionInfo() {
+      const tmpDir = Services.dirsvc.get("TmpD", Ci.nsIFile);
+      tmpDir.append("thunderbird-mcp");
+      const connFile = tmpDir.clone();
+      connFile.append("connection.json");
+      if (!connFile.exists()) {
+        return { path: connFile.path, data: null };
+      }
+      const fis = Cc["@mozilla.org/network/file-input-stream;1"]
+        .createInstance(Ci.nsIFileInputStream);
+      fis.init(connFile, 0x01, 0, 0);
+      const sis = Cc["@mozilla.org/scriptableinputstream;1"]
+        .createInstance(Ci.nsIScriptableInputStream);
+      sis.init(fis);
+      const text = sis.read(sis.available());
+      sis.close();
+      return { path: connFile.path, data: JSON.parse(text) };
+    }
+
     return {
       mcpServer: {
         start: async function() {
@@ -943,21 +999,6 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
             }
 
             /**
-             * Generate a cryptographically random auth token (hex string).
-             * Used to authenticate bridge requests to the HTTP server.
-             */
-            function generateAuthToken() {
-              const bytes = new Uint8Array(32);
-              // crypto.getRandomValues is not available in Thunderbird experiment API scope;
-              // use the XPCOM random generator instead.
-              const rng = Cc["@mozilla.org/security/random-generator;1"]
-                .createInstance(Ci.nsIRandomGenerator);
-              const randomBytes = rng.generateRandomBytes(32);
-              for (let i = 0; i < 32; i++) bytes[i] = randomBytes[i];
-              return Array.from(bytes, b => b.toString(16).padStart(2, "0")).join("");
-            }
-
-            /**
              * Write connection info (port + auth token) to a well-known file
              * so the bridge can discover how to connect.
              * File: <TmpD>/thunderbird-mcp/connection.json
@@ -1008,7 +1049,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
               }
             }
 
-            const authToken = generateAuthToken();
+            const authToken = getStableAuthTokenPref() || generateAuthToken();
 
             /**
              * Constant-time string comparison to prevent timing side-channel attacks.
@@ -6086,22 +6127,10 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
 
           // Read connection info from temp file using XPCOM file I/O
           try {
-            const tmpDir = Services.dirsvc.get("TmpD", Ci.nsIFile);
-            tmpDir.append("thunderbird-mcp");
-            const connFile = tmpDir.clone();
-            connFile.append("connection.json");
-            connectionFile = connFile.path;
-            if (connFile.exists()) {
-              const fis = Cc["@mozilla.org/network/file-input-stream;1"]
-                .createInstance(Ci.nsIFileInputStream);
-              fis.init(connFile, 0x01, 0, 0);
-              const sis = Cc["@mozilla.org/scriptableinputstream;1"]
-                .createInstance(Ci.nsIScriptableInputStream);
-              sis.init(fis);
-              const text = sis.read(sis.available());
-              sis.close();
-              const data = JSON.parse(text);
-              port = data.port || null;
+            const connInfo = readConnectionInfo();
+            connectionFile = connInfo.path;
+            if (connInfo.data) {
+              port = connInfo.data.port || null;
             }
           } catch (e) {
             // Connection file is absent before the server first binds; log other faults.
@@ -6117,6 +6146,21 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
             buildVersion,
             buildDate,
           };
+        },
+
+        getCurrentAuthToken: async function() {
+          let authToken = "";
+          try {
+            const connInfo = readConnectionInfo();
+            if (connInfo.data && typeof connInfo.data.token === "string") {
+              authToken = connInfo.data.token;
+            }
+          } catch (e) {
+            if (e?.name !== "NS_ERROR_FILE_NOT_FOUND") {
+              console.warn("thunderbird-mcp: read auth token failed:", e);
+            }
+          }
+          return { authToken };
         },
 
         getAccountAccessConfig: async function() {
@@ -6271,6 +6315,30 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
             try { Services.prefs.clearUserPref(PREF_BLOCK_SKIPREVIEW); } catch { /* ignore */ }
           }
           return { success: true, blockSkipReview };
+        },
+
+        getStableAuthToken: async function() {
+          return { stableAuthToken: getStableAuthTokenPref() };
+        },
+
+        setStableAuthToken: async function(stableAuthToken) {
+          if (typeof stableAuthToken !== "string") {
+            return { error: "stableAuthToken must be a string" };
+          }
+          stableAuthToken = stableAuthToken.trim();
+          if (stableAuthToken && !AUTH_TOKEN_PATTERN.test(stableAuthToken)) {
+            return { error: "stableAuthToken must be empty or 64 lowercase hex characters" };
+          }
+          if (stableAuthToken) {
+            Services.prefs.setStringPref(PREF_STABLE_AUTH_TOKEN, stableAuthToken);
+          } else {
+            try { Services.prefs.clearUserPref(PREF_STABLE_AUTH_TOKEN); } catch { /* ignore */ }
+          }
+          return { success: true, stableAuthToken };
+        },
+
+        generateAuthToken: async function() {
+          return { authToken: generateAuthToken() };
         },
       }
     };

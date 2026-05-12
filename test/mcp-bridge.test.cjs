@@ -9,6 +9,7 @@ const {
   buildConnectionDiscoveryErrorMessage,
   clearConnectionCache,
   discoverConnectionInfo,
+  isValidAuthToken,
   readConnectionInfo,
 } = require('../mcp-bridge.cjs');
 
@@ -82,6 +83,24 @@ function makeFsWithStatOverrides(overrides) {
     }
   });
 }
+
+describe('Auth token validation', () => {
+  it('accepts 64 lowercase hex characters', () => {
+    assert.equal(isValidAuthToken('a'.repeat(64)), true);
+    assert.equal(isValidAuthToken('0123456789abcdef'.repeat(4)), true);
+  });
+
+  it('rejects non-generated token shapes', () => {
+    assert.equal(isValidAuthToken(''), false);
+    assert.equal(isValidAuthToken(' '.repeat(64)), false);
+    assert.equal(isValidAuthToken('a'.repeat(63)), false);
+    assert.equal(isValidAuthToken('a'.repeat(65)), false);
+    assert.equal(isValidAuthToken('A'.repeat(64)), false);
+    assert.equal(isValidAuthToken('g'.repeat(64)), false);
+    assert.equal(isValidAuthToken(`${'a'.repeat(64)}\n`), false);
+    assert.equal(isValidAuthToken(null), false);
+  });
+});
 
 describe('Bridge discovery', () => {
   let root;

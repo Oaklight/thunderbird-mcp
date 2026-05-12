@@ -18,6 +18,13 @@
         "parameters": []
       },
       {
+        "name": "getCurrentAuthToken",
+        "type": "function",
+        "async": true,
+        "description": "Get the auth token currently used by the running MCP server",
+        "parameters": []
+      },
+      {
         "name": "getAccountAccessConfig",
         "type": "function",
         "async": true,
@@ -78,6 +85,33 @@
             "description": "When true, send/reply/forward tools reject skipReview=true and require the review window."
           }
         ]
+      },
+      {
+        "name": "getStableAuthToken",
+        "type": "function",
+        "async": true,
+        "description": "Get the stored stable auth token preference",
+        "parameters": []
+      },
+      {
+        "name": "setStableAuthToken",
+        "type": "function",
+        "async": true,
+        "description": "Set the stored stable auth token preference",
+        "parameters": [
+          {
+            "name": "stableAuthToken",
+            "type": "string",
+            "description": "Stable token to reuse across MCP server starts. Empty string clears the preference and restores per-startup rotation."
+          }
+        ]
+      },
+      {
+        "name": "generateAuthToken",
+        "type": "function",
+        "async": true,
+        "description": "Generate a fresh auth token string",
+        "parameters": []
       }
     ]
   }
