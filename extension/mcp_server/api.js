@@ -2753,7 +2753,14 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
 
             function searchContacts(query, maxResults) {
               const results = [];
-              const lowerQuery = query.toLowerCase();
+              const lowerQuery = (query || "").toLowerCase();
+              const hasQuery = !!lowerQuery;
+              let queryTokens = [];
+              // Tokenize so CardDAV "Lastname, Firstname" names match natural-order searches.
+              if (hasQuery) {
+                queryTokens = lowerQuery.split(/[,\s]+/).filter(Boolean);
+              }
+              const failedQuery = hasQuery && queryTokens.length === 0;
               const requestedLimit = Number(maxResults);
               const limit = Number.isFinite(requestedLimit) && requestedLimit > 0
                 ? Math.min(Math.floor(requestedLimit), MAX_SEARCH_RESULTS_CAP)
@@ -2768,11 +2775,13 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                   const displayName = (card.displayName || "").toLowerCase();
                   const firstName = (card.firstName || "").toLowerCase();
                   const lastName = (card.lastName || "").toLowerCase();
+                  const fields = [email, displayName, firstName, lastName];
 
-                  if (email.includes(lowerQuery) ||
-                      displayName.includes(lowerQuery) ||
-                      firstName.includes(lowerQuery) ||
-                      lastName.includes(lowerQuery)) {
+                  if (failedQuery) continue;
+                  const matches = !hasQuery || queryTokens.every(token =>
+                    fields.some(field => field.includes(token))
+                  );
+                  if (matches) {
                     results.push({
                       id: card.UID,
                       displayName: card.displayName,
