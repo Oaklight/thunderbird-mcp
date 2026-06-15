@@ -287,12 +287,16 @@ IsHigherThan   = 7     // Priority comparison
 IsLowerThan    = 8     // Priority comparison
 BeginsWith     = 9
 EndsWith       = 10
-IsInAB         = 11    // Is in address book
-IsntInAB       = 12    // Not in address book
+SoundsLike     = 11    // Phonetic match (LDAP)
+LdapDwim       = 12    // LDAP do-what-I-mean
 IsGreaterThan  = 13    // Size comparison
 IsLessThan     = 14    // Size comparison
-Matches        = 15    // Regex match
-DoesntMatch    = 16    // Regex no match
+NameCompletion = 15    // LDAP name completion
+IsInAB         = 16    // Is in address book
+IsntInAB       = 17    // Not in address book
+IsntEmpty      = 18
+Matches        = 19    // Regex match
+DoesntMatch    = 20    // Regex no match
 ```
 
 ### Filter Actions (nsMsgFilterAction)
