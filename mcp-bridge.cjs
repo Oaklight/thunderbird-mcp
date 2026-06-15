@@ -575,9 +575,9 @@ async function readAttachmentFromPath(filePath) {
   try {
     stat = await fs.promises.stat(filePath);
   } catch (e) {
-    if (e.code === 'ENOENT') throw new Error(`Attachment not found: ${filePath}`);
-    if (e.code === 'EACCES') throw new Error(`Attachment unreadable (permission denied): ${filePath}`);
-    throw new Error(`Attachment stat failed (${e.code || 'unknown'}): ${filePath}`);
+    if (e.code === 'ENOENT') throw new Error(`Attachment not found: ${filePath}`, { cause: e });
+    if (e.code === 'EACCES') throw new Error(`Attachment unreadable (permission denied): ${filePath}`, { cause: e });
+    throw new Error(`Attachment stat failed (${e.code || 'unknown'}): ${filePath}`, { cause: e });
   }
   if (!stat.isFile()) {
     throw new Error(`Attachment is not a regular file: ${filePath}`);
@@ -592,7 +592,7 @@ async function readAttachmentFromPath(filePath) {
   try {
     buf = await fs.promises.readFile(filePath);
   } catch (e) {
-    throw new Error(`Attachment read failed (${e.code || 'unknown'}): ${filePath}`);
+    throw new Error(`Attachment read failed (${e.code || 'unknown'}): ${filePath}`, { cause: e });
   }
   return {
     name: path.basename(filePath),
@@ -925,12 +925,12 @@ async function forwardToThunderbird(message) {
         clearConnectionCache();
         connInfo = readConnectionInfo();
         if (!connInfo) {
-          throw new Error(`Connection failed: ${err.message}. Is Thunderbird running with the MCP extension?`);
+          throw new Error(`Connection failed: ${err.message}. Is Thunderbird running with the MCP extension?`, { cause: err });
         }
         continue;
       }
 
-      throw new Error(`Connection failed: ${err.message}. Is Thunderbird running with the MCP extension?`);
+      throw new Error(`Connection failed: ${err.message}. Is Thunderbird running with the MCP extension?`, { cause: err });
     }
   }
 }

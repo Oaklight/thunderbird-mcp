@@ -2545,7 +2545,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
 	             */
             function findTrashFolder(folder) {
               const TRASH_FLAG = 0x00000100;
-              let account = null;
+              let account;
               try {
                 account = MailServices.accounts.findAccountForServer(folder.server);
               } catch {
@@ -4153,7 +4153,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                 const hasNonTextFilename = !!filename && !ct.startsWith("text/");
                 if (!hasAttachmentDisposition && !hasInlineFilename && !hasNonTextFilename) return;
 
-                let bytes = null;
+                let bytes;
                 try {
                   bytes = decodeTransferBody(split.body, getHeader(headers, "content-transfer-encoding"));
                 } catch {
@@ -4407,7 +4407,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                         const msgUri = msgHdr.folder.getUriForMsg(msgHdr);
                         for (const { part, name, ct } of inlineImages) {
                           // Resolve to a fetchable URL via the message service
-                          let partUrl = "";
+                          let partUrl;
                           try {
                             const svc = MailServices.messageServiceFromURI(msgUri);
                             const baseUri = svc.getUrlForUri(msgUri);
@@ -4613,7 +4613,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                                           } catch (e) {
                                             return { error: `attachment raw MIME recovery write failed: ${e}` };
                                           }
-                                          let recoveredSize = null;
+                                          let recoveredSize;
                                           try {
                                             recoveredSize = file.fileSize;
                                             if (recoveredSize > MAX_ATTACHMENT_BYTES) {
@@ -6789,7 +6789,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                 break;
               } catch (portErr) {
                 if (attempt === MCP_MAX_PORT_ATTEMPTS - 1) {
-                  throw new Error(`Could not bind to any port in range ${MCP_DEFAULT_PORT}-${tryPort}: ${portErr}`);
+                  throw new Error(`Could not bind to any port in range ${MCP_DEFAULT_PORT}-${tryPort}: ${portErr}`, { cause: portErr });
                 }
                 console.warn(`Port ${tryPort} in use, trying ${tryPort + 1}...`);
               }
