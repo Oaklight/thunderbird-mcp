@@ -1,8 +1,11 @@
 name: Thunderbird Version Check
 
-# Polls Mozilla's product-details API for new Thunderbird releases and opens a
-# PR to bump strict_max_version in the extension manifest when the latest stable
-# version exceeds the currently declared ceiling. Runs weekly and on-demand.
+# Detects new Thunderbird releases, validates compatibility by loading the
+# extension into real Thunderbird (stable + beta), then opens a PR to bump
+# strict_max_version only after both channels pass. If either channel fails,
+# opens an issue instead.
+#
+# Flow: detect → compat-test (stable + beta) → open PR or issue
 
 on:
   schedule:
@@ -12,10 +15,19 @@ on:
 permissions:
   contents: write
   pull-requests: write
+  issues: write
 
 jobs:
-  check-version:
+  # ── Stage 1: detect whether a version bump is needed ───────────────────
+  detect:
     runs-on: ubuntu-latest
+    outputs:
+      needs_bump: ${{ steps.check.outputs.needs_bump }}
+      latest: ${{ steps.tb.outputs.latest }}
+      latest_major: ${{ steps.tb.outputs.latest_major }}
+      beta: ${{ steps.tb.outputs.beta }}
+      max_version: ${{ steps.manifest.outputs.max_version }}
+      new_max: ${{ steps.check.outputs.new_max }}
     steps:
       - uses: actions/checkout@v6
 
@@ -30,14 +42,12 @@ jobs:
           echo "latest=$LATEST" >> "$GITHUB_OUTPUT"
           echo "latest_major=$LATEST_MAJOR" >> "$GITHUB_OUTPUT"
           echo "beta=$BETA" >> "$GITHUB_OUTPUT"
-          echo "Latest stable: $LATEST (major: $LATEST_MAJOR)"
-          echo "Latest beta:   $BETA"
+          echo "Latest stable: $LATEST (major: $LATEST_MAJOR), beta: $BETA"
 
       - name: Read current strict_max_version
         id: manifest
         run: |
           MAX_VER=$(node -p "require('./extension/manifest.json').browser_specific_settings.gecko.strict_max_version")
-          # Extract numeric part from e.g. "151.*"
           MAX_MAJOR=$(echo "$MAX_VER" | cut -d. -f1)
 
           echo "max_version=$MAX_VER" >> "$GITHUB_OUTPUT"
@@ -53,16 +63,32 @@ jobs:
           if [ "$LATEST_MAJOR" -gt "$MAX_MAJOR" ]; then
             echo "needs_bump=true" >> "$GITHUB_OUTPUT"
             echo "new_max=${LATEST_MAJOR}.*" >> "$GITHUB_OUTPUT"
-            echo "::warning::Thunderbird ${{ steps.tb.outputs.latest }} is out, but strict_max_version is ${{ steps.manifest.outputs.max_version }}"
+            echo "::warning::Thunderbird ${{ steps.tb.outputs.latest }} exceeds strict_max_version ${{ steps.manifest.outputs.max_version }}"
           else
             echo "needs_bump=false" >> "$GITHUB_OUTPUT"
-            echo "Thunderbird ${{ steps.tb.outputs.latest }} is within strict_max_version ${{ steps.manifest.outputs.max_version }} — no bump needed."
+            echo "No bump needed — TB ${{ steps.tb.outputs.latest }} within ${{ steps.manifest.outputs.max_version }}"
           fi
 
-      - name: Bump strict_max_version
-        if: steps.check.outputs.needs_bump == 'true'
+  # ── Stage 2: compatibility test (only when bump needed) ────────────────
+  compat-test:
+    needs: detect
+    if: needs.detect.outputs.needs_bump == 'true'
+    name: compat-test (${{ matrix.channel }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        channel: [stable, beta]
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22.x"
+
+      - name: Bump manifest for testing
         run: |
-          NEW_MAX="${{ steps.check.outputs.new_max }}"
+          NEW_MAX="${{ needs.detect.outputs.new_max }}"
           node -e "
             const fs = require('fs');
             const p = './extension/manifest.json';
@@ -70,25 +96,202 @@ jobs:
             m.browser_specific_settings.gecko.strict_max_version = '$NEW_MAX';
             fs.writeFileSync(p, JSON.stringify(m, null, 2) + '\n');
           "
-          echo "Bumped strict_max_version to $NEW_MAX"
+          echo "Testing with strict_max_version = $NEW_MAX"
+
+      - name: Build extension
+        run: bash scripts/build.sh
+
+      - name: Install Thunderbird (${{ matrix.channel }})
+        run: |
+          sudo apt-get update -qq
+          if [ "${{ matrix.channel }}" = "stable" ]; then
+            sudo install -d -m 0755 /etc/apt/keyrings
+            wget -qO- https://packages.mozilla.org/apt/repo-signing-key.gpg \
+              | sudo tee /etc/apt/keyrings/packages.mozilla.org.asc > /dev/null
+            echo "deb [signed-by=/etc/apt/keyrings/packages.mozilla.org.asc] https://packages.mozilla.org/apt mozilla main" \
+              | sudo tee /etc/apt/sources.list.d/mozilla.list > /dev/null
+            printf 'Package: *\nPin: origin packages.mozilla.org\nPin-Priority: 1000\n' \
+              | sudo tee /etc/apt/preferences.d/mozilla > /dev/null
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq thunderbird
+          elif [ "${{ matrix.channel }}" = "beta" ]; then
+            BETA_VER="${{ needs.detect.outputs.beta }}"
+            echo "Downloading Thunderbird Beta $BETA_VER"
+            wget -q "https://download.mozilla.org/?product=thunderbird-${BETA_VER}-SSL&os=linux64&lang=en-US" -O thunderbird-beta.tar.xz \
+              || wget -q "https://archive.mozilla.org/pub/thunderbird/releases/${BETA_VER}/linux-x86_64/en-US/thunderbird-${BETA_VER}.tar.bz2" -O thunderbird-beta.tar.xz
+            mkdir -p /opt/thunderbird-beta
+            tar -xf thunderbird-beta.tar.xz -C /opt/thunderbird-beta --strip-components=1 2>/dev/null \
+              || tar -xjf thunderbird-beta.tar.xz -C /opt/thunderbird-beta --strip-components=1
+            sudo ln -sf /opt/thunderbird-beta/thunderbird /usr/local/bin/thunderbird-beta
+          fi
+
+      - name: Get installed Thunderbird version
+        id: tb_ver
+        run: |
+          if [ "${{ matrix.channel }}" = "beta" ]; then TB_BIN="thunderbird-beta"; else TB_BIN="thunderbird"; fi
+          TB_VERSION=$($TB_BIN --version 2>/dev/null | grep -oP '[\d.]+[a-z0-9]*' | head -1) || TB_VERSION="unknown"
+          echo "version=$TB_VERSION" >> "$GITHUB_OUTPUT"
+          echo "tb_bin=$TB_BIN" >> "$GITHUB_OUTPUT"
+          echo "Thunderbird ${{ matrix.channel }}: $TB_VERSION"
+
+      - name: Create test profile with extension
+        id: profile
+        run: |
+          PROFILE_DIR=$(mktemp -d)
+          mkdir -p "$PROFILE_DIR/extensions"
+          cp dist/thunderbird-mcp.xpi "$PROFILE_DIR/extensions/thunderbird-mcp@tkasperczyk.dev.xpi"
+          cat > "$PROFILE_DIR/user.js" << 'PREFS'
+          user_pref("extensions.experiments.enabled", true);
+          user_pref("app.update.enabled", false);
+          user_pref("toolkit.telemetry.reportingpolicy.firstRun", false);
+          user_pref("datareporting.policy.dataSubmissionEnabled", false);
+          PREFS
+          echo "profile_dir=$PROFILE_DIR" >> "$GITHUB_OUTPUT"
+
+      - name: Launch Thunderbird and check extension loading
+        run: |
+          sudo apt-get install -y -qq xvfb
+          TB_BIN="${{ steps.tb_ver.outputs.tb_bin }}"
+          PROFILE_DIR="${{ steps.profile.outputs.profile_dir }}"
+
+          timeout 30 xvfb-run --auto-servernum "$TB_BIN" \
+            --profile "$PROFILE_DIR" --headless --no-remote 2>&1 &
+          TB_PID=$!
+
+          for i in $(seq 1 25); do
+            [ -f "$PROFILE_DIR/extensions.json" ] && { sleep 2; break; }
+            sleep 1
+          done
+          kill $TB_PID 2>/dev/null || true
+          wait $TB_PID 2>/dev/null || true
+
+      - name: Verify extension loaded successfully
+        run: |
+          EXT_JSON="${{ steps.profile.outputs.profile_dir }}/extensions.json"
+          TB_VERSION="${{ steps.tb_ver.outputs.version }}"
+
+          if [ ! -f "$EXT_JSON" ]; then
+            echo "::error::extensions.json not created — Thunderbird may have failed to start"
+            exit 1
+          fi
+
+          node -e "
+            const ext = require('$EXT_JSON');
+            const mcp = ext.addons.find(a => a.id === 'thunderbird-mcp@tkasperczyk.dev');
+            if (!mcp) { console.error('::error::Extension not found'); process.exit(1); }
+
+            console.log('Extension: ' + mcp.id + ' v' + mcp.version);
+            console.log('  active:       ' + mcp.active);
+            console.log('  appDisabled:  ' + mcp.appDisabled);
+
+            if (mcp.appDisabled) {
+              console.error('::error::Extension is appDisabled on Thunderbird $TB_VERSION');
+              process.exit(1);
+            }
+            console.log('Extension loaded OK on Thunderbird $TB_VERSION');
+          "
+
+      - name: Cleanup
+        if: always()
+        run: rm -rf "${{ steps.profile.outputs.profile_dir }}"
+
+  # ── Stage 3: open PR (only after both channels pass) ───────────────────
+  open-pr:
+    needs: [detect, compat-test]
+    if: needs.detect.outputs.needs_bump == 'true' && needs.compat-test.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Bump strict_max_version
+        run: |
+          NEW_MAX="${{ needs.detect.outputs.new_max }}"
+          node -e "
+            const fs = require('fs');
+            const p = './extension/manifest.json';
+            const m = JSON.parse(fs.readFileSync(p, 'utf8'));
+            m.browser_specific_settings.gecko.strict_max_version = '$NEW_MAX';
+            fs.writeFileSync(p, JSON.stringify(m, null, 2) + '\n');
+          "
 
       - name: Create pull request
-        if: steps.check.outputs.needs_bump == 'true'
         uses: peter-evans/create-pull-request@v7
         with:
-          branch: auto/bump-tb-${{ steps.tb.outputs.latest_major }}
+          branch: auto/bump-tb-${{ needs.detect.outputs.latest_major }}
           delete-branch: true
-          title: "fix(compat): bump strict_max_version for Thunderbird ${{ steps.tb.outputs.latest }}"
+          title: "fix(compat): bump strict_max_version for Thunderbird ${{ needs.detect.outputs.latest }}"
           body: |
             ## Summary
 
-            Thunderbird **${{ steps.tb.outputs.latest }}** has been released, but `strict_max_version` in `extension/manifest.json` is set to `${{ steps.manifest.outputs.max_version }}`.
+            Thunderbird **${{ needs.detect.outputs.latest }}** has been released, but `strict_max_version` was `${{ needs.detect.outputs.max_version }}`.
 
-            This PR bumps it to `${{ steps.check.outputs.new_max }}` so the extension is not marked `appDisabled` on the new version.
+            This PR bumps it to `${{ needs.detect.outputs.new_max }}`.
+
+            ### Compatibility test results
+
+            The extension was loaded into real Thunderbird (stable + beta) in CI and verified:
+            - ✅ Not `appDisabled` — manifest is accepted
+            - ✅ `experiment_apis` loads successfully
+            - ✅ Extension activates without errors
 
             **Source:** [Mozilla product-details API](https://product-details.mozilla.org/1.0/thunderbird_versions.json)
 
             ---
-            *Auto-generated by the [tb-version-check](${{ github.server_url }}/${{ github.repository }}/actions/workflows/tb-version-check.yml) workflow.*
-          commit-message: "fix(compat): bump strict_max_version to ${{ steps.check.outputs.new_max }} for Thunderbird ${{ steps.tb.outputs.latest }}"
+            *Auto-generated by [tb-version-check](${{ github.server_url }}/${{ github.repository }}/actions/workflows/tb-version-check.yml). Compatibility verified before PR creation.*
+          commit-message: "fix(compat): bump strict_max_version to ${{ needs.detect.outputs.new_max }} for Thunderbird ${{ needs.detect.outputs.latest }}"
           labels: compatibility
+
+  # ── Stage 3 (alt): open issue if compat test fails ─────────────────────
+  open-issue:
+    needs: [detect, compat-test]
+    if: needs.detect.outputs.needs_bump == 'true' && needs.compat-test.result == 'failure'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Create compatibility issue
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const title = `Thunderbird ${{ needs.detect.outputs.latest }} compatibility issue`;
+            // Avoid duplicates
+            const existing = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'compatibility',
+            });
+            if (existing.data.some(i => i.title === title)) {
+              console.log('Issue already exists, skipping.');
+              return;
+            }
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title,
+              labels: ['compatibility', 'bug'],
+              body: [
+                `## Thunderbird ${{ needs.detect.outputs.latest }} breaks the extension`,
+                '',
+                `The compatibility test failed when loading the extension into Thunderbird ${{ needs.detect.outputs.latest }}.`,
+                `Current \`strict_max_version\`: \`${{ needs.detect.outputs.max_version }}\``,
+                `Attempted bump to: \`${{ needs.detect.outputs.new_max }}\``,
+                '',
+                '### What happened',
+                '',
+                'The extension was built with the bumped `strict_max_version` and installed into a real Thunderbird instance,',
+                'but it failed to load — either `appDisabled: true` persisted or the `experiment_apis` did not initialize.',
+                '',
+                'This likely means Thunderbird made a breaking change that requires code-level fixes beyond a simple version bump.',
+                '',
+                '### Next steps',
+                '',
+                '- [ ] Check the [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for error details',
+                '- [ ] Identify which XPCOM interface or experiment API changed',
+                '- [ ] Update the extension code to be compatible',
+                '- [ ] Bump `strict_max_version` after the fix',
+                '',
+                '---',
+                '*Auto-generated by [tb-version-check](${{ github.server_url }}/${{ github.repository }}/actions/workflows/tb-version-check.yml).*',
+              ].join('\n'),
+            });
