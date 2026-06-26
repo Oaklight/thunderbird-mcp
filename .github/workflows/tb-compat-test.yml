@@ -15,6 +15,11 @@ jobs:
   compat-test:
     name: TB compat (${{ matrix.channel }})
     runs-on: ubuntu-latest
+    # Beta runs against the next TB major (one ahead of the cap), so it is an
+    # early-warning signal, not a merge gate. Once Thunderbird disables
+    # experiment APIs on a future beta this leg will fail; that must not block
+    # unrelated PRs. The weekly scheduled workflow keeps beta/esr as hard signals.
+    continue-on-error: ${{ matrix.channel == 'beta' }}
     strategy:
       fail-fast: false
       matrix:
