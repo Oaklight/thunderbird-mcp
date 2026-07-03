@@ -738,9 +738,13 @@ async function isThunderbirdRunning() {
     ]);
     return ok && stdout.toLowerCase().includes('thunderbird.exe');
   }
-  // Linux / macOS — check both 'thunderbird' and 'thunderbird-bin' (Snap/Flatpak)
-  const { ok } = await execCommand('pgrep', ['-x', 'thunderbird|thunderbird-bin']);
-  return ok;
+  // Linux / macOS — the process name varies by distribution:
+  //   'thunderbird' on some, 'thunderbird-bin' on Arch/Snap/Flatpak.
+  //   pgrep -x does NOT support regex, so try both names.
+  const { ok: ok1 } = await execCommand('pgrep', ['-x', 'thunderbird']);
+  if (ok1) return true;
+  const { ok: ok2 } = await execCommand('pgrep', ['-x', 'thunderbird-bin']);
+  return ok2;
 }
 
 function spawnThunderbird() {
@@ -766,7 +770,10 @@ async function stopThunderbirdProcess() {
   if (process.platform === 'win32') {
     return execCommand('taskkill', ['/IM', 'thunderbird.exe']);
   }
-  return execCommand('pkill', ['-x', 'thunderbird']);
+  // Try both process names (see isThunderbirdRunning comment)
+  const { ok: ok1 } = await execCommand('pkill', ['-x', 'thunderbird']);
+  if (ok1) return { ok: true };
+  return execCommand('pkill', ['-x', 'thunderbird-bin']);
 }
 
 async function handleLifecycleTool(name) {
@@ -823,11 +830,14 @@ async function handleLifecycleTool(name) {
         return JSON.stringify({ stopped: false, message: 'Thunderbird is not running' });
       }
       debugLog('lifecycle: stopping Thunderbird');
-      const { ok } = await stopThunderbirdProcess();
+      await stopThunderbirdProcess();
+      // Give the process a moment to exit, then verify
+      await new Promise((resolve) => setTimeout(resolve, 1000));
       clearConnectionCache();
+      const stillRunning = await isThunderbirdRunning();
       return JSON.stringify({
-        stopped: ok,
-        message: ok ? 'Thunderbird stopped' : 'Failed to stop Thunderbird',
+        stopped: !stillRunning,
+        message: stillRunning ? 'Failed to stop Thunderbird' : 'Thunderbird stopped',
       });
     }
 
@@ -939,22 +949,31 @@ async function handleMessage(line) {
         result: { tools: [...extensionTools, ...LIFECYCLE_TOOL_SCHEMAS] },
       };
     } catch (err) {
-      // Auth errors (403) should propagate — they mean Thunderbird IS running
-      // but the token is wrong. Only swallow connection-level failures
-      // (no connection file, ECONNREFUSED, timeout) where Thunderbird is
-      // genuinely not reachable.
-      if (err.message && /authentication failed/i.test(err.message)) {
+      // Only fall back to lifecycle tools when Thunderbird is genuinely
+      // unreachable — connection discovery found no file at all, or the
+      // process isn't listening (ECONNREFUSED). All other errors (corrupt
+      // connection file, auth failures, invalid port/token) must propagate
+      // so security invariants hold.
+      const msg = err.message || '';
+      const isDiscoveryFailure = /Connection discovery failed/i.test(msg);
+      const isConnectionRefused = err.code === 'ECONNREFUSED'
+        || err.code === 'EADDRNOTAVAIL'
+        || err.code === 'EAFNOSUPPORT';
+
+      if (isDiscoveryFailure || isConnectionRefused) {
+        debugLog(`tools/list: Thunderbird not reachable (${msg}), returning lifecycle tools only`);
         return {
           jsonrpc: '2.0',
           id: message.id,
-          error: { code: -32700, message: `Bridge error: ${err.message}` },
+          result: { tools: [...LIFECYCLE_TOOL_SCHEMAS] },
         };
       }
-      debugLog(`tools/list: Thunderbird not reachable (${err.message}), returning lifecycle tools only`);
+
+      // Auth errors, corrupt connection files, etc. — propagate
       return {
         jsonrpc: '2.0',
         id: message.id,
-        result: { tools: [...LIFECYCLE_TOOL_SCHEMAS] },
+        error: { code: -32700, message: `Bridge error: ${msg}` },
       };
     }
   }
