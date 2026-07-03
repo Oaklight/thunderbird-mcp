@@ -977,13 +977,28 @@ async function handleMessage(line) {
       // process isn't listening (ECONNREFUSED). All other errors (corrupt
       // connection file, auth failures, invalid port/token) must propagate
       // so security invariants hold.
+      //
+      // forwardToThunderbird wraps low-level errors in a new Error with
+      // message "Connection failed: <original>", so we check both the
+      // wrapper message and the cause's error code.
       const msg = err.message || '';
-      const isDiscoveryFailure = /Connection discovery failed/i.test(msg);
-      const isConnectionRefused = err.code === 'ECONNREFUSED'
-        || err.code === 'EADDRNOTAVAIL'
-        || err.code === 'EAFNOSUPPORT';
+      const causeCode = err.cause?.code;
+      const isAuthError =
+        /authentication failed/i.test(msg) ||
+        causeCode === 403 ||
+        err.cause?.statusCode === 403;
+      const isUnreachable = !isAuthError && (
+        /Connection discovery failed/i.test(msg) ||
+        /Connection failed/i.test(msg) ||
+        causeCode === 'ECONNREFUSED' ||
+        causeCode === 'EADDRNOTAVAIL' ||
+        causeCode === 'EAFNOSUPPORT' ||
+        err.code === 'ECONNREFUSED' ||
+        err.code === 'EADDRNOTAVAIL' ||
+        err.code === 'EAFNOSUPPORT'
+      );
 
-      if (isDiscoveryFailure || isConnectionRefused) {
+      if (isUnreachable) {
         debugLog(`tools/list: Thunderbird not reachable (${msg}), returning lifecycle tools only`);
         return {
           jsonrpc: '2.0',
