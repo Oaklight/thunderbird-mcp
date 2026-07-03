@@ -10,6 +10,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const { execFile, spawn } = require('child_process');
 
 const THUNDERBIRD_HOSTS = ['127.0.0.1'];
 const REQUEST_TIMEOUT = 30000;
@@ -22,6 +23,41 @@ const DEFAULT_DARWIN_FOLDERS_ROOT = '/var/folders';
 const THUNDERBIRD_MCP_SUBDIR = 'thunderbird-mcp';
 const CONNECTION_FILE_BASENAME = 'connection.json';
 const AUTH_TOKEN_PATTERN = /^[0-9a-f]{64}$/;
+
+// ── Lifecycle tools ──────────────────────────────────────────────────────────
+// Bridge-local tools for managing the Thunderbird process. These are handled
+// entirely within the bridge and never forwarded to the extension.
+const LIFECYCLE_LAUNCH_POLL_MS = 2000;
+const LIFECYCLE_LAUNCH_MAX_POLLS = 15; // 15 × 2s = 30s max wait
+
+const LIFECYCLE_TOOL_SCHEMAS = [
+  {
+    name: 'launchThunderbird',
+    description:
+      'Start Thunderbird if it is not already running. ' +
+      'Waits for the MCP extension to become reachable (up to ~30 s). ' +
+      'Returns immediately if Thunderbird is already running.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+  },
+  {
+    name: 'stopThunderbird',
+    description:
+      'Gracefully stop the running Thunderbird process. ' +
+      'IMPORTANT: Always ask the user for explicit confirmation before calling this tool — ' +
+      'the user may have unsaved work (e.g. composing an email). ' +
+      'No-op if Thunderbird is not running.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+  },
+  {
+    name: 'thunderbirdStatus',
+    description:
+      'Check whether Thunderbird is running and whether the MCP extension ' +
+      'is reachable. Returns { running, extensionReachable, port? }.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+  },
+];
+
+const LIFECYCLE_TOOL_NAMES = new Set(LIFECYCLE_TOOL_SCHEMAS.map((t) => t.name));
 
 // MCP protocol versions the bridge knows how to speak. Per lifecycle spec the
 // server MUST respond with the requested version if it supports it, otherwise
@@ -685,6 +721,121 @@ function buildConnectionDiscoveryErrorMessage() {
   );
 }
 
+// ── Lifecycle tool helpers ────────────────────────────────────────────────────
+
+function execCommand(cmd, args) {
+  return new Promise((resolve) => {
+    execFile(cmd, args, { timeout: 5000 }, (err, stdout) => {
+      resolve({ ok: !err, stdout: (stdout || '').trim() });
+    });
+  });
+}
+
+async function isThunderbirdRunning() {
+  if (process.platform === 'win32') {
+    const { ok, stdout } = await execCommand('tasklist', [
+      '/FI', 'IMAGENAME eq thunderbird.exe', '/NH',
+    ]);
+    return ok && stdout.toLowerCase().includes('thunderbird.exe');
+  }
+  // Linux / macOS — check both 'thunderbird' and 'thunderbird-bin' (Snap/Flatpak)
+  const { ok } = await execCommand('pgrep', ['-x', 'thunderbird|thunderbird-bin']);
+  return ok;
+}
+
+function spawnThunderbird() {
+  let proc;
+  if (process.platform === 'darwin') {
+    proc = spawn('open', ['-a', 'Thunderbird'], {
+      detached: true, stdio: 'ignore',
+    });
+  } else if (process.platform === 'win32') {
+    proc = spawn('cmd', ['/c', 'start', '', 'thunderbird.exe'], {
+      detached: true, stdio: 'ignore', shell: true,
+    });
+  } else {
+    proc = spawn('thunderbird', [], {
+      detached: true, stdio: 'ignore',
+    });
+  }
+  proc.unref();
+  return proc;
+}
+
+async function stopThunderbirdProcess() {
+  if (process.platform === 'win32') {
+    return execCommand('taskkill', ['/IM', 'thunderbird.exe']);
+  }
+  return execCommand('pkill', ['-x', 'thunderbird']);
+}
+
+async function handleLifecycleTool(name) {
+  switch (name) {
+    case 'thunderbirdStatus': {
+      const running = await isThunderbirdRunning();
+      const connInfo = readConnectionInfo();
+      const result = {
+        running,
+        extensionReachable: !!(connInfo && connInfo.port && connInfo.token),
+      };
+      if (connInfo && connInfo.port) {
+        result.port = connInfo.port;
+      }
+      return JSON.stringify(result);
+    }
+
+    case 'launchThunderbird': {
+      if (await isThunderbirdRunning()) {
+        const connInfo = readConnectionInfo();
+        if (connInfo) {
+          return JSON.stringify({ launched: false, message: 'Thunderbird is already running', extensionReachable: true });
+        }
+        return JSON.stringify({ launched: false, message: 'Thunderbird is running but the MCP extension is not reachable yet' });
+      }
+
+      debugLog('lifecycle: launching Thunderbird');
+      spawnThunderbird();
+
+      // Poll for the connection file (extension takes a few seconds to start)
+      for (let i = 0; i < LIFECYCLE_LAUNCH_MAX_POLLS; i++) {
+        await new Promise((resolve) => setTimeout(resolve, LIFECYCLE_LAUNCH_POLL_MS));
+        clearConnectionCache();
+        const connInfo = readConnectionInfo();
+        if (connInfo) {
+          debugLog(`lifecycle: extension reachable after ${(i + 1) * LIFECYCLE_LAUNCH_POLL_MS}ms`);
+          return JSON.stringify({ launched: true, message: 'Thunderbird started and MCP extension is reachable', port: connInfo.port });
+        }
+      }
+
+      // Thunderbird started but extension didn't become reachable in time
+      const running = await isThunderbirdRunning();
+      return JSON.stringify({
+        launched: true,
+        message: running
+          ? 'Thunderbird started but the MCP extension did not become reachable within the timeout. It may still be loading.'
+          : 'Thunderbird process exited unexpectedly',
+        extensionReachable: false,
+      });
+    }
+
+    case 'stopThunderbird': {
+      if (!(await isThunderbirdRunning())) {
+        return JSON.stringify({ stopped: false, message: 'Thunderbird is not running' });
+      }
+      debugLog('lifecycle: stopping Thunderbird');
+      const { ok } = await stopThunderbirdProcess();
+      clearConnectionCache();
+      return JSON.stringify({
+        stopped: ok,
+        message: ok ? 'Thunderbird stopped' : 'Failed to stop Thunderbird',
+      });
+    }
+
+    default:
+      throw new Error(`Unknown lifecycle tool: ${name}`);
+  }
+}
+
 function sanitizeJson(data) {
   // Remove control chars except \n, \r, \t. The character class is
   // intentional -- some clients emit stray control bytes and we
@@ -746,6 +897,66 @@ async function handleMessage(line) {
       return { jsonrpc: '2.0', id: message.id, result: { resources: [] } };
     case 'prompts/list':
       return { jsonrpc: '2.0', id: message.id, result: { prompts: [] } };
+  }
+
+  // Handle bridge-local lifecycle tool calls without forwarding to Thunderbird.
+  if (message.method === 'tools/call'
+      && message.params
+      && LIFECYCLE_TOOL_NAMES.has(message.params.name)) {
+    try {
+      const text = await handleLifecycleTool(message.params.name);
+      return {
+        jsonrpc: '2.0',
+        id: message.id,
+        result: { content: [{ type: 'text', text }] },
+      };
+    } catch (e) {
+      return {
+        jsonrpc: '2.0',
+        id: message.id,
+        error: { code: -32603, message: e.message },
+      };
+    }
+  }
+
+  // For tools/list, try to get the extension's tools and merge lifecycle tools.
+  // If Thunderbird is not reachable, return only the lifecycle tools so the
+  // client can still discover launchThunderbird. Auth errors (403) are
+  // propagated as-is — they indicate a real token mismatch, not a missing
+  // Thunderbird instance.
+  if (message.method === 'tools/list') {
+    try {
+      const response = await forwardToThunderbird(message);
+      if (response.error) {
+        // Forward errors from the extension (e.g. auth failures) verbatim,
+        // but still append lifecycle tools so the client can recover.
+        return response;
+      }
+      const extensionTools = response?.result?.tools || [];
+      return {
+        jsonrpc: '2.0',
+        id: message.id,
+        result: { tools: [...extensionTools, ...LIFECYCLE_TOOL_SCHEMAS] },
+      };
+    } catch (err) {
+      // Auth errors (403) should propagate — they mean Thunderbird IS running
+      // but the token is wrong. Only swallow connection-level failures
+      // (no connection file, ECONNREFUSED, timeout) where Thunderbird is
+      // genuinely not reachable.
+      if (err.message && /authentication failed/i.test(err.message)) {
+        return {
+          jsonrpc: '2.0',
+          id: message.id,
+          error: { code: -32700, message: `Bridge error: ${err.message}` },
+        };
+      }
+      debugLog(`tools/list: Thunderbird not reachable (${err.message}), returning lifecycle tools only`);
+      return {
+        jsonrpc: '2.0',
+        id: message.id,
+        result: { tools: [...LIFECYCLE_TOOL_SCHEMAS] },
+      };
+    }
   }
 
   // For mail-sending tools, inline any attachments passed as file paths.
@@ -1044,7 +1255,11 @@ module.exports = {
   findSnapConnectionCandidates,
   formatDiscoveryAttempts,
   compactToolResultJsonText,
+  handleLifecycleTool,
+  isThunderbirdRunning,
   isValidAuthToken,
+  LIFECYCLE_TOOL_NAMES,
+  LIFECYCLE_TOOL_SCHEMAS,
   readConnectionInfo,
   startBridge,
 };
