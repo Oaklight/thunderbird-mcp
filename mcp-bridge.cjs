@@ -731,6 +731,13 @@ function execCommand(cmd, args) {
   });
 }
 
+// Process names to check across platforms. On Linux the binary can be
+// 'thunderbird' or 'thunderbird-bin' (Arch, Snap, Flatpak). On macOS the
+// Finder name is 'Thunderbird' but the actual process is 'thunderbird' or
+// 'thunderbird-bin'. pgrep -x is case-sensitive and doesn't support regex,
+// so we try each name individually.
+const THUNDERBIRD_PROCESS_NAMES = ['thunderbird', 'thunderbird-bin'];
+
 async function isThunderbirdRunning() {
   if (process.platform === 'win32') {
     const { ok, stdout } = await execCommand('tasklist', [
@@ -738,24 +745,27 @@ async function isThunderbirdRunning() {
     ]);
     return ok && stdout.toLowerCase().includes('thunderbird.exe');
   }
-  // Linux / macOS — the process name varies by distribution:
-  //   'thunderbird' on some, 'thunderbird-bin' on Arch/Snap/Flatpak.
-  //   pgrep -x does NOT support regex, so try both names.
-  const { ok: ok1 } = await execCommand('pgrep', ['-x', 'thunderbird']);
-  if (ok1) return true;
-  const { ok: ok2 } = await execCommand('pgrep', ['-x', 'thunderbird-bin']);
-  return ok2;
+  for (const name of THUNDERBIRD_PROCESS_NAMES) {
+    const { ok } = await execCommand('pgrep', ['-x', name]);
+    if (ok) return true;
+  }
+  return false;
 }
 
 function spawnThunderbird() {
   let proc;
   if (process.platform === 'darwin') {
+    // 'open -a' launches the macOS app bundle and returns immediately.
+    // The app runs independently of this process.
     proc = spawn('open', ['-a', 'Thunderbird'], {
       detached: true, stdio: 'ignore',
     });
   } else if (process.platform === 'win32') {
+    // On Windows, Thunderbird registers its install location in the registry.
+    // 'start ""' searches the App Paths registry key and PATH, so it finds
+    // Thunderbird regardless of install directory (default: Program Files).
     proc = spawn('cmd', ['/c', 'start', '', 'thunderbird.exe'], {
-      detached: true, stdio: 'ignore', shell: true,
+      detached: true, stdio: 'ignore',
     });
   } else {
     proc = spawn('thunderbird', [], {
@@ -768,12 +778,25 @@ function spawnThunderbird() {
 
 async function stopThunderbirdProcess() {
   if (process.platform === 'win32') {
-    return execCommand('taskkill', ['/IM', 'thunderbird.exe']);
+    // Try graceful WM_CLOSE first, fall back to forceful /F if needed.
+    const { ok } = await execCommand('taskkill', ['/IM', 'thunderbird.exe']);
+    if (ok) return;
+    await execCommand('taskkill', ['/F', '/IM', 'thunderbird.exe']);
+    return;
   }
-  // Try both process names (see isThunderbirdRunning comment)
-  const { ok: ok1 } = await execCommand('pkill', ['-x', 'thunderbird']);
-  if (ok1) return { ok: true };
-  return execCommand('pkill', ['-x', 'thunderbird-bin']);
+  if (process.platform === 'darwin') {
+    // AppleScript quit is the idiomatic way to close a macOS app — it lets
+    // Thunderbird save state and run its shutdown sequence, same as Cmd-Q.
+    const { ok } = await execCommand('osascript', [
+      '-e', 'tell application "Thunderbird" to quit',
+    ]);
+    if (ok) return;
+  }
+  // Linux, or macOS osascript fallback: try SIGTERM via pkill for each
+  // known process name.
+  for (const name of THUNDERBIRD_PROCESS_NAMES) {
+    await execCommand('pkill', ['-x', name]);
+  }
 }
 
 async function handleLifecycleTool(name) {
