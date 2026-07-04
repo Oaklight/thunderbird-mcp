@@ -30,6 +30,10 @@ const AUTH_TOKEN_PATTERN = /^[0-9a-f]{64}$/;
 const LIFECYCLE_LAUNCH_POLL_MS = 2000;
 const LIFECYCLE_LAUNCH_MAX_POLLS = 15; // 15 × 2s = 30s max wait
 
+// Module-level stdout writer set by startBridge(). Used by lifecycle tools
+// to emit notifications/tools/list_changed after launch/stop.
+let _writeNotification = null;
+
 const LIFECYCLE_TOOL_SCHEMAS = [
   {
     name: 'launchThunderbird',
@@ -799,6 +803,16 @@ async function stopThunderbirdProcess() {
   }
 }
 
+function emitToolsListChanged() {
+  if (_writeNotification) {
+    debugLog('lifecycle: emitting notifications/tools/list_changed');
+    _writeNotification({
+      jsonrpc: '2.0',
+      method: 'notifications/tools/list_changed',
+    });
+  }
+}
+
 async function handleLifecycleTool(name) {
   switch (name) {
     case 'thunderbirdStatus': {
@@ -833,6 +847,7 @@ async function handleLifecycleTool(name) {
         const connInfo = readConnectionInfo();
         if (connInfo) {
           debugLog(`lifecycle: extension reachable after ${(i + 1) * LIFECYCLE_LAUNCH_POLL_MS}ms`);
+          emitToolsListChanged();
           return JSON.stringify({ launched: true, message: 'Thunderbird started and MCP extension is reachable', port: connInfo.port });
         }
       }
@@ -858,6 +873,9 @@ async function handleLifecycleTool(name) {
       await new Promise((resolve) => setTimeout(resolve, 1000));
       clearConnectionCache();
       const stillRunning = await isThunderbirdRunning();
+      if (!stillRunning) {
+        emitToolsListChanged();
+      }
       return JSON.stringify({
         stopped: !stillRunning,
         message: stillRunning ? 'Failed to stop Thunderbird' : 'Thunderbird stopped',
@@ -919,7 +937,7 @@ async function handleMessage(line) {
         id: message.id,
         result: {
           protocolVersion: negotiated,
-          capabilities: { tools: {} },
+          capabilities: { tools: { listChanged: true } },
           serverInfo: SERVER_INFO,
         },
       };
@@ -1225,6 +1243,10 @@ function startBridge() {
       }
     });
   }
+
+  // Expose writeOutput so lifecycle tools can emit notifications.
+  _writeNotification = (notification) =>
+    writeOutput(JSON.stringify(notification) + '\n');
 
   function dispatch(line) {
     if (!line.trim()) {
