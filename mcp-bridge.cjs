@@ -848,7 +848,13 @@ async function handleLifecycleTool(name) {
         if (connInfo) {
           debugLog(`lifecycle: extension reachable after ${(i + 1) * LIFECYCLE_LAUNCH_POLL_MS}ms`);
           emitToolsListChanged();
-          return JSON.stringify({ launched: true, message: 'Thunderbird started and MCP extension is reachable', port: connInfo.port });
+          return JSON.stringify({
+            launched: true,
+            message: 'Thunderbird started and MCP extension is reachable. '
+              + 'The full set of email, calendar, and contacts tools is now available. '
+              + 'You should re-discover available tools to access them.',
+            port: connInfo.port,
+          });
         }
       }
 
@@ -878,7 +884,9 @@ async function handleLifecycleTool(name) {
       }
       return JSON.stringify({
         stopped: !stillRunning,
-        message: stillRunning ? 'Failed to stop Thunderbird' : 'Thunderbird stopped',
+        message: stillRunning
+          ? 'Failed to stop Thunderbird'
+          : 'Thunderbird stopped. Email, calendar, and contacts tools are no longer available.',
       });
     }
 
