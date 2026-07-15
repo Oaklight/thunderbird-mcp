@@ -89,6 +89,7 @@ const SERVER_INFO = Object.freeze({
 });
 
 const DEBUG = !!process.env.THUNDERBIRD_MCP_DEBUG;
+const LIFECYCLE_ENABLED = !!process.env.THUNDERBIRD_MCP_LIFECYCLE;
 
 function debugLog(message) {
   if (DEBUG) {
@@ -962,6 +963,16 @@ async function handleMessage(line) {
   if (message.method === 'tools/call'
       && message.params
       && LIFECYCLE_TOOL_NAMES.has(message.params.name)) {
+    if (!LIFECYCLE_ENABLED) {
+      return {
+        jsonrpc: '2.0',
+        id: message.id,
+        error: {
+          code: -32601,
+          message: 'Lifecycle tools are disabled. Set THUNDERBIRD_MCP_LIFECYCLE=1 to enable.',
+        },
+      };
+    }
     try {
       const text = await handleLifecycleTool(message.params.name);
       return {
@@ -978,8 +989,8 @@ async function handleMessage(line) {
     }
   }
 
-  // For tools/list, try to get the extension's tools and merge lifecycle tools.
-  // If Thunderbird is not reachable, return only the lifecycle tools so the
+  // For tools/list, merge lifecycle tools when LIFECYCLE_ENABLED.
+  // If Thunderbird is not reachable, return lifecycle tools (if enabled) so the
   // client can still discover launchThunderbird. Auth errors (403) are
   // propagated as-is — they indicate a real token mismatch, not a missing
   // Thunderbird instance.
@@ -992,10 +1003,13 @@ async function handleMessage(line) {
         return response;
       }
       const extensionTools = response?.result?.tools || [];
+      const tools = LIFECYCLE_ENABLED
+        ? [...extensionTools, ...LIFECYCLE_TOOL_SCHEMAS]
+        : extensionTools;
       return {
         jsonrpc: '2.0',
         id: message.id,
-        result: { tools: [...extensionTools, ...LIFECYCLE_TOOL_SCHEMAS] },
+        result: { tools },
       };
     } catch (err) {
       // Only fall back to lifecycle tools when Thunderbird is genuinely
@@ -1025,11 +1039,12 @@ async function handleMessage(line) {
       );
 
       if (isUnreachable) {
-        debugLog(`tools/list: Thunderbird not reachable (${msg}), returning lifecycle tools only`);
+        const tools = LIFECYCLE_ENABLED ? [...LIFECYCLE_TOOL_SCHEMAS] : [];
+        debugLog(`tools/list: Thunderbird not reachable (${msg}), returning ${tools.length} lifecycle tools`);
         return {
           jsonrpc: '2.0',
           id: message.id,
-          result: { tools: [...LIFECYCLE_TOOL_SCHEMAS] },
+          result: { tools },
         };
       }
 
@@ -1345,6 +1360,7 @@ module.exports = {
   handleLifecycleTool,
   isThunderbirdRunning,
   isValidAuthToken,
+  LIFECYCLE_ENABLED,
   LIFECYCLE_TOOL_NAMES,
   LIFECYCLE_TOOL_SCHEMAS,
   readConnectionInfo,

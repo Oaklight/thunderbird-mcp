@@ -41,10 +41,11 @@ function isPortInUse(port) {
 /**
  * Helper: send a JSON-RPC message to the bridge and get the response.
  */
-function sendToBridge(message, { timeout = 10000 } = {}) {
+function sendToBridge(message, { timeout = 10000, env } = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [BRIDGE_PATH], {
       stdio: ['pipe', 'pipe', 'pipe'],
+      ...(env ? { env } : {}),
     });
 
     let stdout = '';
@@ -184,7 +185,7 @@ describe('Auth: connection info file', () => {
       jsonrpc: '2.0',
       id: 2,
       method: 'tools/list'
-    });
+    }, { env: { ...process.env, THUNDERBIRD_MCP_LIFECYCLE: '1' } });
 
     assert.equal(response.id, 2);
     assert.ok(response.result, 'should return a result with lifecycle tools');

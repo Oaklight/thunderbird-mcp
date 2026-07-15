@@ -117,7 +117,25 @@ The same settings page has a "Send Safety" section: toggle **Block `skipReview`*
 
 ### Lifecycle management
 
-The bridge exposes three tools for managing the Thunderbird process itself. These are handled locally by the bridge and never forwarded to the extension, so they work even when Thunderbird is not running.
+The bridge can optionally expose three tools for managing the Thunderbird process itself. These are handled locally by the bridge and never forwarded to the extension, so they work even when Thunderbird is not running.
+
+**Opt-in required:** Lifecycle tools are disabled by default. Set `THUNDERBIRD_MCP_LIFECYCLE=1` to enable them:
+
+```json
+{
+  "mcpServers": {
+    "thunderbird-mail": {
+      "command": "node",
+      "args": ["/absolute/path/to/thunderbird-mcp/mcp-bridge.cjs"],
+      "env": {
+        "THUNDERBIRD_MCP_LIFECYCLE": "1"
+      }
+    }
+  }
+}
+```
+
+When disabled, these tools are absent from `tools/list` and return an error if called directly.
 
 | Tool | Description |
 |------|-------------|
@@ -136,7 +154,7 @@ stopThunderbird (with user confirmation)
 
 Thunderbird is launched as a detached process -- it stays running even if the MCP client (Claude, Hermes, etc.) disconnects. This is intentional: the user may have Thunderbird open for their own work.
 
-When Thunderbird is not running, `tools/list` returns only the three lifecycle tools. Once Thunderbird starts, `tools/list` returns all extension tools plus the lifecycle tools.
+When lifecycle tools are enabled and Thunderbird is not running, `tools/list` returns only the three lifecycle tools. Once Thunderbird starts, `tools/list` returns all extension tools plus the lifecycle tools.
 
 ---
 
@@ -218,6 +236,7 @@ That's it. Your AI can now access Thunderbird.
 | Connection refused | Make sure Thunderbird is running and the extension is enabled |
 | Bridge can't find `connection.json` | Set `THUNDERBIRD_MCP_CONNECTION_FILE` explicitly if your environment uses a non-standard temp/runtime path |
 | Missing recent emails | IMAP folders can be stale. Click the folder in Thunderbird to sync, or right-click > Properties > Repair Folder |
+| Lifecycle tools not appearing | Set `THUNDERBIRD_MCP_LIFECYCLE=1` in your MCP client config (disabled by default) |
 | Tool not found after update | Reconnect MCP (`/mcp` in Claude Code) to pick up new tools |
 | `searchBody` returns no results | IMAP accounts need offline sync enabled for Gloda to index message bodies |
 | `rawSource` fails on IMAP | Requires local/offline message copy. Enable offline sync or click the message first to cache it. |

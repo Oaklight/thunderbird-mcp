@@ -11,6 +11,7 @@ const { spawn } = require('child_process');
 const path = require('path');
 
 const {
+  LIFECYCLE_ENABLED,
   LIFECYCLE_TOOL_NAMES,
   LIFECYCLE_TOOL_SCHEMAS,
 } = require('../mcp-bridge.cjs');
@@ -22,10 +23,11 @@ const BRIDGE_PATH = path.resolve(__dirname, '..', 'mcp-bridge.cjs');
  * and return the parsed JSON-RPC response for the request (skipping the
  * initialize response).
  */
-function callBridge(request, timeoutMs = 15000) {
+function callBridge(request, { timeoutMs = 15000, env } = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [BRIDGE_PATH], {
       stdio: ['pipe', 'pipe', 'pipe'],
+      ...(env ? { env } : {}),
     });
 
     let buf = '';
@@ -108,7 +110,7 @@ describe('tools/list with lifecycle tools', () => {
   it('returns lifecycle tools even when Thunderbird is not running', async () => {
     const resp = await callBridge({
       jsonrpc: '2.0', id: 1, method: 'tools/list', params: {},
-    });
+    }, { env: { ...process.env, THUNDERBIRD_MCP_LIFECYCLE: '1' } });
 
     assert.ok(resp.result, 'tools/list should return a result');
     assert.ok(Array.isArray(resp.result.tools), 'result.tools should be an array');
@@ -127,7 +129,7 @@ describe('thunderbirdStatus tool', () => {
     const resp = await callBridge({
       jsonrpc: '2.0', id: 1, method: 'tools/call',
       params: { name: 'thunderbirdStatus', arguments: {} },
-    });
+    }, { env: { ...process.env, THUNDERBIRD_MCP_LIFECYCLE: '1' } });
 
     assert.ok(resp.result, 'should return a result');
     assert.ok(Array.isArray(resp.result.content), 'result.content should be an array');
@@ -146,7 +148,7 @@ describe('stopThunderbird response shape', () => {
     const resp = await callBridge({
       jsonrpc: '2.0', id: 1, method: 'tools/call',
       params: { name: 'stopThunderbird', arguments: {} },
-    });
+    }, { env: { ...process.env, THUNDERBIRD_MCP_LIFECYCLE: '1' } });
 
     assert.ok(resp.result, 'should return a result');
     assert.ok(Array.isArray(resp.result.content), 'result.content should be an array');
@@ -170,5 +172,46 @@ describe('lifecycle tool routing', () => {
     assert.ok(LIFECYCLE_TOOL_NAMES.has('launchThunderbird'));
     assert.ok(LIFECYCLE_TOOL_NAMES.has('stopThunderbird'));
     assert.ok(LIFECYCLE_TOOL_NAMES.has('thunderbirdStatus'));
+  });
+});
+
+// ── Opt-in gate (THUNDERBIRD_MCP_LIFECYCLE) ─────────────────────────────────
+
+describe('lifecycle opt-in gate', () => {
+  it('LIFECYCLE_ENABLED is false when env var is unset', () => {
+    // The test process itself does not set THUNDERBIRD_MCP_LIFECYCLE,
+    // so the imported constant should be false.
+    assert.equal(LIFECYCLE_ENABLED, false);
+  });
+
+  it('tools/list omits lifecycle tools when gate is disabled', async () => {
+    const env = { ...process.env };
+    delete env.THUNDERBIRD_MCP_LIFECYCLE;
+
+    const resp = await callBridge({
+      jsonrpc: '2.0', id: 1, method: 'tools/list', params: {},
+    }, { env });
+
+    assert.ok(resp.result, 'tools/list should return a result');
+    assert.ok(Array.isArray(resp.result.tools), 'result.tools should be an array');
+
+    const toolNames = resp.result.tools.map((t) => t.name);
+    assert.ok(!toolNames.includes('launchThunderbird'), 'should not include launchThunderbird');
+    assert.ok(!toolNames.includes('stopThunderbird'), 'should not include stopThunderbird');
+    assert.ok(!toolNames.includes('thunderbirdStatus'), 'should not include thunderbirdStatus');
+  });
+
+  it('tools/call returns error for lifecycle tools when gate is disabled', async () => {
+    const env = { ...process.env };
+    delete env.THUNDERBIRD_MCP_LIFECYCLE;
+
+    const resp = await callBridge({
+      jsonrpc: '2.0', id: 1, method: 'tools/call',
+      params: { name: 'thunderbirdStatus', arguments: {} },
+    }, { env });
+
+    assert.ok(resp.error, 'should return an error');
+    assert.equal(resp.error.code, -32601);
+    assert.ok(resp.error.message.includes('THUNDERBIRD_MCP_LIFECYCLE'), 'error should mention the env var');
   });
 });
